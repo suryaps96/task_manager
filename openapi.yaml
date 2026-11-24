@@ -1,0 +1,757 @@
+openapi: 3.0.3
+info:
+  title: Task Manager API
+  description: |
+    Django REST Framework Task Manager API.
+
+    **Custom errors:** Many task endpoints return `{ error: { code, message, details } }` via `error_response` in `tasks/views.py`.
+    List/query failures, malformed JSON, 405, and unhandled 500 responses may use Django/DRF default formats instead.
+
+    **Idempotency:** `Idempotency-Key` is supported on three POST routes. Storage is in-memory (`idempotency_store`) and is lost on server restart.
+
+  version: "1.0.0"
+
+servers:
+  - url: http://127.0.0.1:8000
+    description: Local development (`manage.py runserver`)
+
+tags:
+  - name: Tasks
+    description: CRUD and list
+  - name: Natural language
+    description: Rule-based parser (`tasks/ai.py`; not an LLM)
+  - name: Subtasks
+    description: List and create children under a parent task
+  - name: Breakdown
+    description: Generate subtasks from parent description
+  - name: Priority
+    description: Unpaginated filter shortcut
+
+paths:
+  /api/tasks/:
+    get:
+      tags: [Tasks]
+      summary: List tasks
+      description: |
+        Paginated list of all tasks (includes subtasks). Default ordering `-created_at`.
+        Invalid `ordering` / `page` values may return DRF's default error body, not `ErrorResponse`.
+      parameters:
+        - $ref: "#/components/parameters/FilterCompleted"
+        - $ref: "#/components/parameters/FilterPriority"
+        - $ref: "#/components/parameters/Search"
+        - $ref: "#/components/parameters/Ordering"
+        - $ref: "#/components/parameters/Page"
+      responses:
+        "200":
+          description: Paginated tasks (page size 10)
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/PaginatedTaskResponse"
+              examples:
+                pageOne:
+                  value:
+                    count: 25
+                    next: "http://127.0.0.1:8000/api/tasks/?page=2"
+                    previous: null
+                    results:
+                      - id: 1
+                        title: Review pull requests
+                        description: Review open PRs in the repo
+                        completed: false
+                        due_date: "2026-04-01"
+                        priority: medium
+                        parent: null
+                        created_at: "2026-11-24T10:00:00.000Z"
+                        updated_at: "2026-11-24T10:00:00.000Z"
+    post:
+      tags: [Tasks]
+      summary: Create task
+      description: |
+        Creates a task. A non-null `parent` must refer to a root task; using an existing subtask as the parent
+        is rejected with `400 VALIDATION_ERROR` and a `parent` detail.
+        `/subtasks/` and `/breakdown/` reject a subtask as the route parent with `INVALID_PARENT`.
+      parameters:
+        - $ref: "#/components/parameters/IdempotencyKey"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/TaskCreate"
+            examples:
+              full:
+                value:
+                  title: Review pull requests
+                  description: Review open PRs in the task manager repo
+                  completed: false
+                  priority: high
+                  due_date: "2026-04-01"
+              minimal:
+                value:
+                  title: Minimal task
+                  description: Title and description only; defaults completed=false, priority=medium
+      responses:
+        "201":
+          description: Task created
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Task"
+        "400":
+          description: Validation failed (custom envelope)
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+              examples:
+                validation:
+                  value:
+                    error:
+                      code: VALIDATION_ERROR
+                      message: Validation failed
+                      details:
+                        - field: description
+                          issue: Description cannot be more than 500 characters.
+                invalidParent:
+                  value:
+                    error:
+                      code: VALIDATION_ERROR
+                      message: Validation failed
+                      details:
+                        - field: parent
+                          issue: A subtask cannot have its own subtasks.
+        "422":
+          description: Idempotency key reused with a different request
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+              examples:
+                idempotency:
+                  value:
+                    error:
+                      code: IDEMPOTENCY_KEY_REUSED
+                      message: Idempotency key reused with a different request
+                      details:
+                        - field: Idempotency-Key
+                          issue: This key was already used with a different request
+
+  /api/tasks/{id}/:
+    parameters:
+      - $ref: "#/components/parameters/TaskId"
+    get:
+      tags: [Tasks]
+      summary: Retrieve task
+      responses:
+        "200":
+          description: Task
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Task"
+        "404":
+          $ref: "#/components/responses/TaskNotFound"
+    put:
+      tags: [Tasks]
+      summary: Full update
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/TaskReplace"
+      responses:
+        "200":
+          description: Updated task
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Task"
+        "400":
+          $ref: "#/components/responses/ValidationError"
+        "404":
+          $ref: "#/components/responses/TaskNotFound"
+    patch:
+      tags: [Tasks]
+      summary: Partial update
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/TaskUpdate"
+            examples:
+              markComplete:
+                value:
+                  completed: true
+      responses:
+        "200":
+          description: Updated task
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Task"
+        "400":
+          $ref: "#/components/responses/ValidationError"
+        "404":
+          $ref: "#/components/responses/TaskNotFound"
+    delete:
+      tags: [Tasks]
+      summary: Delete task
+      description: Deletes the task; child subtasks are removed via CASCADE.
+      responses:
+        "204":
+          description: No content
+        "404":
+          $ref: "#/components/responses/TaskNotFound"
+
+  /api/tasks/from-text/:
+    post:
+      tags: [Natural language]
+      summary: Create task from natural language
+      description: |
+        Parses `text` with `parse_task_text(text, date.today())` and saves via `TaskSerializer`.
+        Parser may set `due_date` from keywords; `recurrence` exists only in parser output and is **not** persisted on `Task`.
+      parameters:
+        - $ref: "#/components/parameters/IdempotencyKey"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/NaturalLanguageTaskRequest"
+            examples:
+              tomorrow:
+                value:
+                  text: remind me to buy groceries tomorrow
+      responses:
+        "201":
+          description: Parsed task created
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Task"
+        "400":
+          description: Missing, non-string, or empty/whitespace `text` (custom envelope)
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+              examples:
+                emptyText:
+                  value:
+                    error:
+                      code: VALIDATION_ERROR
+                      message: Validation failed
+                      details:
+                        - field: text
+                          issue: Text must not be empty
+        "422":
+          description: Idempotency key reused with a different request
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+        "502":
+          description: Parser or post-parse validation failure (custom envelope)
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+              examples:
+                parserError:
+                  value:
+                    error:
+                      code: PARSER_ERROR
+                      message: Task parsing failed
+                      details:
+                        - field: text
+                          issue: Parser must return a dictionary
+                parserValidation:
+                  value:
+                    error:
+                      code: PARSER_VALIDATION_ERROR
+                      message: Parser returned invalid task data
+                      details:
+                        - field: title
+                          issue: Title cannot contain only whitespace.
+
+  /api/tasks/{id}/subtasks/:
+    parameters:
+      - $ref: "#/components/parameters/TaskId"
+    get:
+      tags: [Subtasks]
+      summary: List subtasks
+      description: Returns direct children only; response is a JSON array (not paginated).
+      responses:
+        "200":
+          description: Array of subtasks
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  $ref: "#/components/schemas/Task"
+        "404":
+          $ref: "#/components/responses/TaskNotFound"
+    post:
+      tags: [Subtasks]
+      summary: Create subtask
+      description: |
+        Parent `{id}` must be a root task (`parent_id` null). Subtask parents are rejected with `INVALID_PARENT`.
+        Request body must not rely on setting `parent`; the view assigns `parent` server-side.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/TaskCreate"
+            examples:
+              subtask:
+                value:
+                  title: Design banner
+                  description: Create hero banner for landing page
+                  priority: high
+      responses:
+        "201":
+          description: Subtask created
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Task"
+        "400":
+          description: Validation or invalid parent (custom envelope)
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+              examples:
+                invalidParent:
+                  value:
+                    error:
+                      code: INVALID_PARENT
+                      message: A subtask cannot have its own subtasks
+                      details:
+                        - field: parent
+                          issue: Subtasks cannot contain subtasks
+                validation:
+                  value:
+                    error:
+                      code: VALIDATION_ERROR
+                      message: Validation failed
+                      details:
+                        - field: description
+                          issue: Description cannot be empty.
+        "404":
+          $ref: "#/components/responses/TaskNotFound"
+
+  /api/tasks/{id}/breakdown/:
+    parameters:
+      - $ref: "#/components/parameters/TaskId"
+    post:
+      tags: [Breakdown]
+      summary: Break down task into subtasks
+      description: |
+        Splits parent `description` on commas and `" and "` via `break_down_task`. All generated rows are validated
+        before any are saved. Rejects subtask parents with `INVALID_PARENT`.
+      parameters:
+        - $ref: "#/components/parameters/IdempotencyKey"
+      requestBody:
+        description: Body participates in idempotency matching; send `{}` consistently for replay.
+        content:
+          application/json:
+            schema:
+              type: object
+              additionalProperties: true
+            examples:
+              empty:
+                value: {}
+      responses:
+        "201":
+          description: Created subtasks
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  $ref: "#/components/schemas/Task"
+        "400":
+          description: Invalid parent or no subtasks generated (custom envelope)
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+              examples:
+                invalidParent:
+                  value:
+                    error:
+                      code: INVALID_PARENT
+                      message: A subtask cannot be broken down
+                      details:
+                        - field: parent
+                          issue: Subtasks cannot contain subtasks
+                noSegments:
+                  value:
+                    error:
+                      code: BREAKDOWN_ERROR
+                      message: No subtasks could be generated
+                      details:
+                        - field: description
+                          issue: No valid subtasks generated
+        "404":
+          $ref: "#/components/responses/TaskNotFound"
+        "422":
+          description: Idempotency key reused with a different request
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+        "502":
+          description: Breakdown validation or unexpected failure (custom envelope)
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+              examples:
+                validation:
+                  value:
+                    error:
+                      code: BREAKDOWN_VALIDATION_ERROR
+                      message: Generated subtasks are invalid
+                      details:
+                        - field: title
+                          issue: Title cannot contain only whitespace.
+                exception:
+                  value:
+                    error:
+                      code: BREAKDOWN_ERROR
+                      message: Task breakdown failed
+                      details:
+                        - field: task
+                          issue: unexpected error message
+
+  /api/tasks/priority/{level}/:
+    get:
+      tags: [Priority]
+      summary: List tasks by priority
+      description: Unpaginated array of tasks matching `level`.
+      parameters:
+        - name: level
+          in: path
+          required: true
+          schema:
+            type: string
+          description: Accepted values are `low`, `medium`, and `high`; other values return HTTP 400.
+      responses:
+        "200":
+          description: Matching tasks
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  $ref: "#/components/schemas/Task"
+        "400":
+          description: Invalid priority level (custom envelope)
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+              examples:
+                invalid:
+                  value:
+                    error:
+                      code: INVALID_PRIORITY
+                      message: Invalid priority level
+                      details:
+                        - field: priority
+                          issue: Priority must be low, medium, or high
+
+components:
+  parameters:
+    TaskId:
+      name: id
+      in: path
+      required: true
+      schema:
+        type: integer
+        format: int64
+      description: Task primary key
+    IdempotencyKey:
+      name: Idempotency-Key
+      in: header
+      required: false
+      schema:
+        type: string
+      description: |
+        Optional. When present on supported POST endpoints, successful responses may be replayed for the same path and body.
+        In-memory storage only; not shared across workers.
+    FilterCompleted:
+      name: completed
+      in: query
+      required: false
+      schema:
+        type: boolean
+      description: Filter by `completed` (`filterset_fields` on list).
+    FilterPriority:
+      name: priority
+      in: query
+      required: false
+      schema:
+        $ref: "#/components/schemas/Priority"
+      description: Filter by priority on list.
+    Search:
+      name: search
+      in: query
+      required: false
+      schema:
+        type: string
+      description: Search `title` and `description` (`SearchFilter`).
+    Ordering:
+      name: ordering
+      in: query
+      required: false
+      schema:
+        type: string
+      description: |
+        One of `created_at`, `updated_at`, `due_date`, `priority` (prefix `-` for descending).
+        Default when omitted on list is `-created_at`.
+    Page:
+      name: page
+      in: query
+      required: false
+      schema:
+        type: integer
+        minimum: 1
+      description: Page number (`PageNumberPagination`, page size 10).
+
+  responses:
+    TaskNotFound:
+      description: Task not found (custom envelope)
+      content:
+        application/json:
+          schema:
+            $ref: "#/components/schemas/ErrorResponse"
+          example:
+            error:
+              code: TASK_NOT_FOUND
+              message: Task not found
+              details:
+                - field: id
+                  issue: Task not found
+    ValidationError:
+      description: Validation failed (custom envelope)
+      content:
+        application/json:
+          schema:
+            $ref: "#/components/schemas/ErrorResponse"
+          example:
+            error:
+              code: VALIDATION_ERROR
+              message: Validation failed
+              details:
+                - field: title
+                  issue: Title cannot contain only whitespace.
+
+  schemas:
+    Priority:
+      type: string
+      enum: [low, medium, high]
+      description: Task priority (`tasks.models.Task.Priority`).
+
+    Task:
+      type: object
+      required:
+        - id
+        - title
+        - description
+        - completed
+        - priority
+        - due_date
+        - parent
+        - created_at
+        - updated_at
+      properties:
+        id:
+          type: integer
+          format: int64
+          readOnly: true
+        title:
+          type: string
+          maxLength: 255
+        description:
+          type: string
+          maxLength: 500
+          description: Stripped; must be non-empty; maximum 500 characters (`TaskSerializer`).
+        completed:
+          type: boolean
+          default: false
+        due_date:
+          type: string
+          format: date
+          nullable: true
+          description: Date (`YYYY-MM-DD`).
+        priority:
+          $ref: "#/components/schemas/Priority"
+        parent:
+          type: integer
+          format: int64
+          nullable: true
+          description: Parent task id, or null for root tasks.
+        created_at:
+          type: string
+          format: date-time
+          readOnly: true
+        updated_at:
+          type: string
+          format: date-time
+          readOnly: true
+
+    TaskCreate:
+      type: object
+      required:
+        - title
+        - description
+      description: |
+        Writable fields for create (`TaskSerializer`). `id`, `created_at`, and `updated_at` are read-only on responses.
+        A non-null `parent` must refer to a root task; using a subtask as the parent returns `400 VALIDATION_ERROR`
+        with `parent` identified in `error.details`.
+      properties:
+        title:
+          type: string
+          maxLength: 255
+        description:
+          type: string
+          maxLength: 500
+        completed:
+          type: boolean
+        due_date:
+          type: string
+          format: date
+          nullable: true
+        priority:
+          $ref: "#/components/schemas/Priority"
+        parent:
+          type: integer
+          format: int64
+          nullable: true
+          description: Parent task id; if non-null, it must refer to a root task.
+
+    TaskReplace:
+      type: object
+      required:
+        - title
+        - description
+      description: Full update fields for `PUT /api/tasks/{id}/`.
+      properties:
+        title:
+          type: string
+          maxLength: 255
+        description:
+          type: string
+          maxLength: 500
+        completed:
+          type: boolean
+        due_date:
+          type: string
+          format: date
+          nullable: true
+        priority:
+          $ref: "#/components/schemas/Priority"
+        parent:
+          type: integer
+          format: int64
+          nullable: true
+          description: Parent task id; if non-null, it must refer to a root task.
+
+    TaskUpdate:
+      type: object
+      description: Partial update fields for `PATCH /api/tasks/{id}/`.
+      properties:
+        title:
+          type: string
+          maxLength: 255
+        description:
+          type: string
+          maxLength: 500
+        completed:
+          type: boolean
+        due_date:
+          type: string
+          format: date
+          nullable: true
+        priority:
+          $ref: "#/components/schemas/Priority"
+        parent:
+          type: integer
+          format: int64
+          nullable: true
+          description: Parent task id; if non-null, it must refer to a root task.
+
+    NaturalLanguageTaskRequest:
+      type: object
+      required:
+        - text
+      properties:
+        text:
+          type: string
+          description: |
+            Non-empty string after strip. Parsed by `parse_task_text`; `recurrence` in parser output is not stored on `Task`.
+
+    ErrorDetail:
+      type: object
+      required:
+        - field
+        - issue
+      properties:
+        field:
+          type: string
+        issue:
+          type: string
+
+    ErrorResponse:
+      type: object
+      required:
+        - error
+      properties:
+        error:
+          type: object
+          required:
+            - code
+            - message
+            - details
+          properties:
+            code:
+              type: string
+              description: |
+                Application error code from `error_response`, e.g. VALIDATION_ERROR, TASK_NOT_FOUND,
+                IDEMPOTENCY_KEY_REUSED, INVALID_PARENT, INVALID_PRIORITY, BREAKDOWN_ERROR,
+                BREAKDOWN_VALIDATION_ERROR, PARSER_ERROR, PARSER_VALIDATION_ERROR.
+            message:
+              type: string
+            details:
+              type: array
+              items:
+                $ref: "#/components/schemas/ErrorDetail"
+
+    PaginatedTaskResponse:
+      type: object
+      required:
+        - count
+        - results
+      properties:
+        count:
+          type: integer
+        next:
+          type: string
+          format: uri
+          nullable: true
+        previous:
+          type: string
+          format: uri
+          nullable: true
+        results:
+          type: array
+          items:
+            $ref: "#/components/schemas/Task"

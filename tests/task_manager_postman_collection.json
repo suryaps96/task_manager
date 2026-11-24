@@ -1,0 +1,1475 @@
+{
+  "info": {
+    "_postman_id": "task-manager-step8-collection",
+    "name": "Task Manager API — Step 8",
+    "description": "Comprehensive Postman tests for the Django REST Task Manager at http://127.0.0.1:8000.\n\n**Run order:** Execute folder **00 Setup** first, then folders 01–09 in numeric order.\n\n**Idempotency keys:** The first request in 00 Setup generates `idempotencyKeyCreate`, `idempotencyKeyFromText`, and `idempotencyKeyBreakdown` once per collection run (via `pm.variables.replaceIn('{{$randomUUID}}')`). Re-run the whole collection or clear variables to generate new keys.\n\n**Paginated list:** `{ count, next, previous, results }` (page size 10).\n\n**Error envelope:** `{ \"error\": { \"code\", \"message\", \"details\": [{ \"field\", \"issue\" }] } }` — collection includes `assertCustomErrorFn` for Tests scripts.\n\n**Note:** Folder 05 overwrites `breakdownParentId` with a subtask id only after happy-path breakdown; folder 04 must run before dependent subtaskId tests.",
+    "schema": "https://schema.getpostman.com/json/collection/v2.1.0/collection.json"
+  },
+  "variable": [
+    { "key": "baseUrl", "value": "http://127.0.0.1:8000" },
+    { "key": "parentTaskId", "value": "" },
+    { "key": "subtaskId", "value": "" },
+    { "key": "breakdownParentId", "value": "" },
+    { "key": "idempotencyKeyCreate", "value": "" },
+    { "key": "idempotencyKeyFromText", "value": "" },
+    { "key": "idempotencyKeyBreakdown", "value": "" },
+    { "key": "unknownTaskId", "value": "999999999" },
+    { "key": "breakdownIdempotencyParentId", "value": "" },
+    { "key": "idempotencyKeyRetry", "value": "" }
+  ],
+  "event": [
+    {
+      "listen": "prerequest",
+      "script": {
+        "type": "text/javascript",
+        "exec": [
+          "/**",
+          " * assertCustomError — shared Postman test helper (call from Tests tab).",
+          " * Usage in test script: eval(pm.collectionVariables.get('assertCustomErrorFn')); assertCustomError(pm.response.json(), 'CODE');",
+          " */",
+          "pm.collectionVariables.set('assertCustomErrorFn', `",
+          "function assertCustomError(body, expectedCode) {",
+          "  pm.expect(body).to.have.property('error');",
+          "  const e = body.error;",
+          "  pm.expect(e).to.include.keys('code', 'message', 'details');",
+          "  pm.expect(e.code).to.eql(expectedCode);",
+          "  pm.expect(e.message).to.be.a('string').and.not.empty;",
+          "  pm.expect(e.details).to.be.an('array').that.is.not.empty;",
+          "  e.details.forEach((d) => {",
+          "    pm.expect(d).to.include.keys('field', 'issue');",
+          "    pm.expect(d.field).to.be.a('string');",
+          "    pm.expect(d.issue).to.be.a('string').and.not.empty;",
+          "  });",
+          "}",
+          "`);"
+        ]
+      }
+    }
+  ],
+  "item": [
+    {
+      "name": "00 Setup — seed data",
+      "item": [
+        {
+          "name": "Create parent task for subtasks",
+          "request": {
+            "method": "POST",
+            "header": [{ "key": "Content-Type", "value": "application/json" }],
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"title\": \"Launch marketing campaign\",\n  \"description\": \"Prepare assets, review copy, and schedule posts\",\n  \"completed\": false,\n  \"priority\": \"high\",\n  \"due_date\": \"2026-03-15\"\n}"
+            },
+            "url": "{{baseUrl}}/api/tasks/",
+            "description": "POST /api/tasks/\nExpected: 201\nStructure: full Task object"
+          },
+          "event": [
+            {
+              "listen": "prerequest",
+              "script": {
+                "exec": [
+                  "const init = pm.collectionVariables.get('idempotencyKeysInitialized');",
+                  "if (init !== 'true') {",
+                  "  const uuid = () => pm.variables.replaceIn('{{$randomUUID}}');",
+                  "  pm.collectionVariables.set('idempotencyKeyCreate', 'idem-create-' + uuid());",
+                  "  pm.collectionVariables.set('idempotencyKeyFromText', 'idem-text-' + uuid());",
+                  "  pm.collectionVariables.set('idempotencyKeyBreakdown', 'idem-break-' + uuid());",
+                  "  pm.collectionVariables.set('idempotencyKeysInitialized', 'true');",
+                  "}"
+                ],
+                "type": "text/javascript"
+              }
+            },
+            {
+              "listen": "test",
+              "script": {
+                "exec": [
+                  "pm.test('Idempotency keys generated', () => {",
+                  "  pm.expect(pm.collectionVariables.get('idempotencyKeyCreate')).to.be.a('string').and.not.empty;",
+                  "  pm.expect(pm.collectionVariables.get('idempotencyKeyFromText')).to.be.a('string').and.not.empty;",
+                  "  pm.expect(pm.collectionVariables.get('idempotencyKeyBreakdown')).to.be.a('string').and.not.empty;",
+                  "});",
+                  "pm.test('Status 201 Created', () => pm.response.to.have.status(201));",
+                  "const j = pm.response.json();",
+                  "pm.test('Has task fields', () => {",
+                  "  pm.expect(j).to.have.property('id');",
+                  "  pm.expect(j.title).to.eql('Launch marketing campaign');",
+                  "  pm.expect(j.parent).to.eql(null);",
+                  "});",
+                  "pm.collectionVariables.set('parentTaskId', j.id);"
+                ],
+                "type": "text/javascript"
+              }
+            }
+          ]
+        },
+        {
+          "name": "Create task for breakdown",
+          "request": {
+            "method": "POST",
+            "header": [{ "key": "Content-Type", "value": "application/json" }],
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"title\": \"Weekly meal prep\",\n  \"description\": \"Buy ingredients, chop vegetables, and cook grains\",\n  \"completed\": false,\n  \"priority\": \"medium\"\n}"
+            },
+            "url": "{{baseUrl}}/api/tasks/",
+            "description": "POST /api/tasks/\nExpected: 201"
+          },
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "exec": [
+                  "pm.test('Status 201', () => pm.response.to.have.status(201));",
+                  "pm.collectionVariables.set('breakdownParentId', pm.response.json().id);"
+                ],
+                "type": "text/javascript"
+              }
+            }
+          ]
+        },
+        {
+          "name": "Create task for combined filter (rent)",
+          "request": {
+            "method": "POST",
+            "header": [{ "key": "Content-Type", "value": "application/json" }],
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"title\": \"Pay high priority rent\",\n  \"description\": \"Monthly rent payment for apartment\",\n  \"completed\": true,\n  \"priority\": \"high\",\n  \"due_date\": \"2026-05-01\"\n}"
+            },
+            "url": "{{baseUrl}}/api/tasks/",
+            "description": "Used by folder 07 combined query (?search=rent&completed=true&priority=high)"
+          },
+          "event": [{ "listen": "test", "script": { "exec": ["pm.test('201', () => pm.response.to.have.status(201));"], "type": "text/javascript" } }]
+        },
+        {
+          "name": "Seed pagination bulk (12 tasks)",
+          "request": {
+            "method": "GET",
+            "url": "{{baseUrl}}/api/tasks/",
+            "description": "Creates 12 tasks via scripted POSTs so page 2 is non-empty (page_size=10)."
+          },
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "exec": [
+                  "const base = pm.collectionVariables.get('baseUrl');",
+                  "let created = 0;",
+                  "const target = 12;",
+                  "function createNext(i) {",
+                  "  if (i >= target) {",
+                  "    pm.test('Created 12 pagination seed tasks', () => pm.expect(created).to.eql(target));",
+                  "  return;",
+                  "}",
+                  "  pm.sendRequest({",
+                  "    url: base + '/api/tasks/',",
+                  "    method: 'POST',",
+                  "    header: { 'Content-Type': 'application/json' },",
+                  "    body: { mode: 'raw', raw: JSON.stringify({ title: 'Pagination bulk ' + (i + 1), description: 'Bulk seed for page 2 tests', priority: 'low' }) }",
+                  "  }, (err, res) => {",
+                  "    pm.expect(res.code).to.eql(201);",
+                  "    created += 1;",
+                  "    createNext(i + 1);",
+                  "  });",
+                  "}",
+                  "createNext(0);"
+                ],
+                "type": "text/javascript"
+              }
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "name": "01 Task CRUD",
+      "item": [
+        {
+          "name": "GET List tasks (paginated)",
+          "request": {
+            "method": "GET",
+            "header": [],
+            "url": "{{baseUrl}}/api/tasks/",
+            "description": "GET /api/tasks/\nExpected: 200\nStructure: { count, next, previous, results[] }"
+          },
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "exec": [
+                  "pm.test('Status 200', () => pm.response.to.have.status(200));",
+                  "const j = pm.response.json();",
+                  "pm.test('DRF paginated shape', () => {",
+                  "  pm.expect(j).to.have.all.keys('count', 'next', 'previous', 'results');",
+                  "  pm.expect(j.count).to.be.a('number');",
+                  "  pm.expect(j.results).to.be.an('array');",
+                  "  pm.expect(j.results.length).to.be.at.most(10);",
+                  "});"
+                ],
+                "type": "text/javascript"
+              }
+            }
+          ]
+        },
+        {
+          "name": "POST Create valid task",
+          "request": {
+            "method": "POST",
+            "header": [{ "key": "Content-Type", "value": "application/json" }],
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"title\": \"Review pull requests\",\n  \"description\": \"Review open PRs in the task manager repo\",\n  \"completed\": false,\n  \"priority\": \"medium\",\n  \"due_date\": \"2026-04-01\"\n}"
+            },
+            "url": "{{baseUrl}}/api/tasks/",
+            "description": "Expected: 201, full task JSON"
+          },
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "exec": [
+                  "pm.test('Status 201', () => pm.response.to.have.status(201));",
+                  "const j = pm.response.json();",
+                  "pm.test('Response structure', () => {",
+                  "  ['id','title','description','completed','priority','parent','created_at','updated_at'].forEach(k => pm.expect(j).to.have.property(k));",
+                  "});"
+                ],
+                "type": "text/javascript"
+              }
+            }
+          ]
+        },
+        {
+          "name": "POST Create minimal task (defaults)",
+          "request": {
+            "method": "POST",
+            "header": [{ "key": "Content-Type", "value": "application/json" }],
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"title\": \"Minimal task\",\n  \"description\": \"Only required semantic fields\"\n}"
+            },
+            "url": "{{baseUrl}}/api/tasks/",
+            "description": "Expected: 201; completed=false, priority=medium"
+          },
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "exec": [
+                  "pm.test('201', () => pm.response.to.have.status(201));",
+                  "const j = pm.response.json();",
+                  "pm.test('Defaults', () => { pm.expect(j.completed).to.eql(false); pm.expect(j.priority).to.eql('medium'); });"
+                ],
+                "type": "text/javascript"
+              }
+            }
+          ]
+        },
+        {
+          "name": "GET Retrieve task by id",
+          "request": {
+            "method": "GET",
+            "url": "{{baseUrl}}/api/tasks/{{parentTaskId}}/",
+            "description": "Expected: 200, single task"
+          },
+          "event": [{ "listen": "test", "script": { "exec": ["pm.test('200', () => pm.response.to.have.status(200));", "pm.expect(pm.response.json().id).to.eql(parseInt(pm.collectionVariables.get('parentTaskId')));"], "type": "text/javascript" } }]
+        },
+        {
+          "name": "PATCH Partial update",
+          "request": {
+            "method": "PATCH",
+            "header": [{ "key": "Content-Type", "value": "application/json" }],
+            "body": { "mode": "raw", "raw": "{\n  \"completed\": true\n}" },
+            "url": "{{baseUrl}}/api/tasks/{{parentTaskId}}/",
+            "description": "Expected: 200; completed true"
+          },
+          "event": [{ "listen": "test", "script": { "exec": ["pm.test('200', () => pm.response.to.have.status(200));", "pm.test('completed updated', () => pm.expect(pm.response.json().completed).to.eql(true));"], "type": "text/javascript" } }]
+        },
+        {
+          "name": "PUT Full update",
+          "request": {
+            "method": "PUT",
+            "header": [{ "key": "Content-Type", "value": "application/json" }],
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"title\": \"Launch marketing campaign (revised)\",\n  \"description\": \"Updated plan for Q2 launch\",\n  \"completed\": false,\n  \"priority\": \"high\",\n  \"due_date\": \"2026-03-20\"\n}"
+            },
+            "url": "{{baseUrl}}/api/tasks/{{parentTaskId}}/",
+            "description": "Expected: 200"
+          },
+          "event": [{ "listen": "test", "script": { "exec": ["pm.test('200', () => pm.response.to.have.status(200));"], "type": "text/javascript" } }]
+        },
+        {
+          "name": "DELETE task (use spare create)",
+          "request": {
+            "method": "POST",
+            "header": [{ "key": "Content-Type", "value": "application/json" }],
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"title\": \"Temporary delete me\",\n  \"description\": \"Created only to test DELETE\"\n}"
+            },
+            "url": "{{baseUrl}}/api/tasks/"
+          },
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "exec": [
+                  "const id = pm.response.json().id;",
+                  "pm.sendRequest({ url: pm.collectionVariables.get('baseUrl') + '/api/tasks/' + id + '/', method: 'DELETE' }, (err, res) => {",
+                  "  pm.test('DELETE status 204', () => pm.expect(res.code).to.eql(204));",
+                  "});"
+                ],
+                "type": "text/javascript"
+              }
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "name": "02 Validation — CRUD edge cases",
+      "item": [
+        {
+          "name": "POST Empty title",
+          "request": {
+            "method": "POST",
+            "header": [{ "key": "Content-Type", "value": "application/json" }],
+            "body": { "mode": "raw", "raw": "{\n  \"title\": \"\",\n  \"description\": \"Valid description\"\n}" },
+            "url": "{{baseUrl}}/api/tasks/",
+            "description": "Expected: 400 VALIDATION_ERROR; error.details"
+          },
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "exec": [
+                  "pm.test('400', () => pm.response.to.have.status(400));",
+                  "eval(pm.collectionVariables.get('assertCustomErrorFn'));",
+                  "assertCustomError(pm.response.json(), 'VALIDATION_ERROR');"
+                ],
+                "type": "text/javascript"
+              }
+            }
+          ]
+        },
+        {
+          "name": "POST Whitespace-only title",
+          "request": {
+            "method": "POST",
+            "header": [{ "key": "Content-Type", "value": "application/json" }],
+            "body": { "mode": "raw", "raw": "{\n  \"title\": \"     \",\n  \"description\": \"Valid description\"\n}" },
+            "url": "{{baseUrl}}/api/tasks/"
+          },
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "exec": [
+                  "pm.test('400', () => pm.response.to.have.status(400));",
+                  "eval(pm.collectionVariables.get('assertCustomErrorFn'));",
+                  "assertCustomError(pm.response.json(), 'VALIDATION_ERROR');"
+                ],
+                "type": "text/javascript"
+              }
+            }
+          ]
+        },
+        {
+          "name": "POST Empty description",
+          "request": {
+            "method": "POST",
+            "header": [{ "key": "Content-Type", "value": "application/json" }],
+            "body": { "mode": "raw", "raw": "{\n  \"title\": \"Valid title\",\n  \"description\": \"\"\n}" },
+            "url": "{{baseUrl}}/api/tasks/"
+          },
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "exec": [
+                  "pm.test('400', () => pm.response.to.have.status(400));",
+                  "eval(pm.collectionVariables.get('assertCustomErrorFn'));",
+                  "assertCustomError(pm.response.json(), 'VALIDATION_ERROR');"
+                ],
+                "type": "text/javascript"
+              }
+            }
+          ]
+        },
+        {
+          "name": "POST Description over 500 chars",
+          "request": {
+            "method": "POST",
+            "header": [{ "key": "Content-Type", "value": "application/json" }],
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"title\": \"Long description test\",\n  \"description\": \"{{longDesc}}\"\n}"
+            },
+            "url": "{{baseUrl}}/api/tasks/"
+          },
+          "event": [
+            {
+              "listen": "prerequest",
+              "script": {
+                "exec": ["pm.variables.set('longDesc', 'A'.repeat(501));"],
+                "type": "text/javascript"
+              }
+            },
+            {
+              "listen": "test",
+              "script": {
+                "exec": [
+                  "pm.test('400', () => pm.response.to.have.status(400));",
+                  "eval(pm.collectionVariables.get('assertCustomErrorFn'));",
+                  "assertCustomError(pm.response.json(), 'VALIDATION_ERROR');"
+                ],
+                "type": "text/javascript"
+              }
+            }
+          ]
+        },
+        {
+          "name": "POST Invalid due_date 2026-02-30",
+          "request": {
+            "method": "POST",
+            "header": [{ "key": "Content-Type", "value": "application/json" }],
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"title\": \"Pay rent\",\n  \"description\": \"Monthly rent\",\n  \"due_date\": \"2026-02-30\"\n}"
+            },
+            "url": "{{baseUrl}}/api/tasks/"
+          },
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "exec": [
+                  "pm.test('400', () => pm.response.to.have.status(400));",
+                  "eval(pm.collectionVariables.get('assertCustomErrorFn'));",
+                  "assertCustomError(pm.response.json(), 'VALIDATION_ERROR');"
+                ],
+                "type": "text/javascript"
+              }
+            }
+          ]
+        },
+        {
+          "name": "POST Invalid priority",
+          "request": {
+            "method": "POST",
+            "header": [{ "key": "Content-Type", "value": "application/json" }],
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"title\": \"Bad priority\",\n  \"description\": \"Testing invalid enum\",\n  \"priority\": \"urgent\"\n}"
+            },
+            "url": "{{baseUrl}}/api/tasks/"
+          },
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "exec": [
+                  "pm.test('400', () => pm.response.to.have.status(400));",
+                  "eval(pm.collectionVariables.get('assertCustomErrorFn'));",
+                  "assertCustomError(pm.response.json(), 'VALIDATION_ERROR');"
+                ],
+                "type": "text/javascript"
+              }
+            }
+          ]
+        },
+        {
+          "name": "POST Non-boolean completed",
+          "request": {
+            "method": "POST",
+            "header": [{ "key": "Content-Type", "value": "application/json" }],
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"title\": \"Completed type test\",\n  \"description\": \"completed should be boolean\",\n  \"completed\": \"maybe\"\n}"
+            },
+            "url": "{{baseUrl}}/api/tasks/"
+          },
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "exec": [
+                  "pm.test('400', () => pm.response.to.have.status(400));",
+                  "eval(pm.collectionVariables.get('assertCustomErrorFn'));",
+                  "assertCustomError(pm.response.json(), 'VALIDATION_ERROR');"
+                ],
+                "type": "text/javascript"
+              }
+            }
+          ]
+        },
+        {
+          "name": "GET Unknown task id",
+          "request": { "method": "GET", "url": "{{baseUrl}}/api/tasks/{{unknownTaskId}}/" },
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "exec": [
+                  "pm.test('404', () => pm.response.to.have.status(404));",
+                  "eval(pm.collectionVariables.get('assertCustomErrorFn'));",
+                  "assertCustomError(pm.response.json(), 'TASK_NOT_FOUND');"
+                ],
+                "type": "text/javascript"
+              }
+            }
+          ]
+        },
+        {
+          "name": "PATCH Unknown task id",
+          "request": {
+            "method": "PATCH",
+            "header": [{ "key": "Content-Type", "value": "application/json" }],
+            "body": { "mode": "raw", "raw": "{\n  \"title\": \"Nope\"\n}" },
+            "url": "{{baseUrl}}/api/tasks/{{unknownTaskId}}/"
+          },
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "exec": [
+                  "pm.test('404', () => pm.response.to.have.status(404));",
+                  "eval(pm.collectionVariables.get('assertCustomErrorFn'));",
+                  "assertCustomError(pm.response.json(), 'TASK_NOT_FOUND');"
+                ],
+                "type": "text/javascript"
+              }
+            }
+          ]
+        },
+        {
+          "name": "PUT Unknown task id",
+          "request": {
+            "method": "PUT",
+            "header": [{ "key": "Content-Type", "value": "application/json" }],
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"title\": \"Ghost task\",\n  \"description\": \"Should not exist\",\n  \"completed\": false,\n  \"priority\": \"medium\"\n}"
+            },
+            "url": "{{baseUrl}}/api/tasks/{{unknownTaskId}}/",
+            "description": "Expected: 404 TASK_NOT_FOUND with custom error envelope"
+          },
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "exec": [
+                  "pm.test('404', () => pm.response.to.have.status(404));",
+                  "eval(pm.collectionVariables.get('assertCustomErrorFn'));",
+                  "assertCustomError(pm.response.json(), 'TASK_NOT_FOUND');"
+                ],
+                "type": "text/javascript"
+              }
+            }
+          ]
+        },
+        {
+          "name": "DELETE Unknown task id",
+          "request": { "method": "DELETE", "url": "{{baseUrl}}/api/tasks/{{unknownTaskId}}/" },
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "exec": [
+                  "pm.test('404', () => pm.response.to.have.status(404));",
+                  "eval(pm.collectionVariables.get('assertCustomErrorFn'));",
+                  "assertCustomError(pm.response.json(), 'TASK_NOT_FOUND');"
+                ],
+                "type": "text/javascript"
+              }
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "name": "03 From-text (natural language)",
+      "item": [
+        {
+          "name": "POST from-text tomorrow",
+          "request": {
+            "method": "POST",
+            "header": [{ "key": "Content-Type", "value": "application/json" }],
+            "body": { "mode": "raw", "raw": "{\n  \"text\": \"remind me to buy groceries tomorrow\"\n}" },
+            "url": "{{baseUrl}}/api/tasks/from-text/",
+            "description": "Expected: 201; due_date set; description = full text"
+          },
+          "event": [{ "listen": "test", "script": { "exec": ["pm.test('201', () => pm.response.to.have.status(201));", "pm.test('due_date present', () => pm.expect(pm.response.json().due_date).to.be.a('string'));"], "type": "text/javascript" } }]
+        },
+        {
+          "name": "POST from-text next week",
+          "request": {
+            "method": "POST",
+            "header": [{ "key": "Content-Type", "value": "application/json" }],
+            "body": { "mode": "raw", "raw": "{\n  \"text\": \"finish sprint report next week\"\n}" },
+            "url": "{{baseUrl}}/api/tasks/from-text/"
+          },
+          "event": [{ "listen": "test", "script": { "exec": ["pm.test('201', () => pm.response.to.have.status(201));"], "type": "text/javascript" } }]
+        },
+        {
+          "name": "POST from-text every month",
+          "request": {
+            "method": "POST",
+            "header": [{ "key": "Content-Type", "value": "application/json" }],
+            "body": { "mode": "raw", "raw": "{\n  \"text\": \"pay utilities on the 1st of every month\"\n}" },
+            "url": "{{baseUrl}}/api/tasks/from-text/"
+          },
+          "event": [{ "listen": "test", "script": { "exec": ["pm.test('201', () => pm.response.to.have.status(201));"], "type": "text/javascript" } }]
+        },
+        {
+          "name": "POST from-text empty string",
+          "request": {
+            "method": "POST",
+            "header": [{ "key": "Content-Type", "value": "application/json" }],
+            "body": { "mode": "raw", "raw": "{\n  \"text\": \"\"\n}" },
+            "url": "{{baseUrl}}/api/tasks/from-text/",
+            "description": "Expected: 400 VALIDATION_ERROR on field text"
+          },
+          "event": [{ "listen": "test", "script": { "exec": ["pm.test('400', () => pm.response.to.have.status(400));"], "type": "text/javascript" } }]
+        },
+        {
+          "name": "POST from-text whitespace only",
+          "request": {
+            "method": "POST",
+            "header": [{ "key": "Content-Type", "value": "application/json" }],
+            "body": { "mode": "raw", "raw": "{\n  \"text\": \"   \"\n}" },
+            "url": "{{baseUrl}}/api/tasks/from-text/"
+          },
+          "event": [{ "listen": "test", "script": { "exec": ["pm.test('400', () => pm.response.to.have.status(400));"], "type": "text/javascript" } }]
+        },
+        {
+          "name": "POST from-text missing text field",
+          "request": {
+            "method": "POST",
+            "header": [{ "key": "Content-Type", "value": "application/json" }],
+            "body": { "mode": "raw", "raw": "{}" },
+            "url": "{{baseUrl}}/api/tasks/from-text/"
+          },
+          "event": [{ "listen": "test", "script": { "exec": ["pm.test('400', () => pm.response.to.have.status(400));"], "type": "text/javascript" } }]
+        }
+      ]
+    },
+    {
+      "name": "04 Subtasks",
+      "item": [
+        {
+          "name": "GET List subtasks (initial)",
+          "request": { "method": "GET", "url": "{{baseUrl}}/api/tasks/{{parentTaskId}}/subtasks/" },
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "exec": [
+                  "pm.test('200 array', () => { pm.response.to.have.status(200); pm.expect(pm.response.json()).to.be.an('array'); });"
+                ],
+                "type": "text/javascript"
+              }
+            }
+          ]
+        },
+        {
+          "name": "POST Create subtask",
+          "request": {
+            "method": "POST",
+            "header": [{ "key": "Content-Type", "value": "application/json" }],
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"title\": \"Design banner\",\n  \"description\": \"Create hero banner for landing page\",\n  \"priority\": \"high\"\n}"
+            },
+            "url": "{{baseUrl}}/api/tasks/{{parentTaskId}}/subtasks/",
+            "description": "Expected: 201; parent = parentTaskId"
+          },
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "exec": [
+                  "pm.test('201', () => pm.response.to.have.status(201));",
+                  "const j = pm.response.json();",
+                  "pm.test('parent set', () => pm.expect(j.parent).to.eql(parseInt(pm.collectionVariables.get('parentTaskId'), 10)));",
+                  "pm.collectionVariables.set('subtaskId', String(j.id));",
+                  "pm.test('subtaskId collection variable set', () => pm.expect(pm.collectionVariables.get('subtaskId')).to.eql(String(j.id)));"
+                ],
+                "type": "text/javascript"
+              }
+            }
+          ]
+        },
+        {
+          "name": "GET List subtasks (after create)",
+          "request": { "method": "GET", "url": "{{baseUrl}}/api/tasks/{{parentTaskId}}/subtasks/" },
+          "event": [{ "listen": "test", "script": { "exec": ["pm.test('200 non-empty', () => { pm.response.to.have.status(200); pm.expect(pm.response.json().length).to.be.above(0); });"], "type": "text/javascript" } }]
+        },
+        {
+          "name": "POST Subtask cannot have subtasks",
+          "request": {
+            "method": "POST",
+            "header": [{ "key": "Content-Type", "value": "application/json" }],
+            "body": { "mode": "raw", "raw": "{\n  \"title\": \"Nested attempt\",\n  \"description\": \"Should fail\"\n}" },
+            "url": "{{baseUrl}}/api/tasks/{{subtaskId}}/subtasks/",
+            "description": "Requires subtaskId from POST Create subtask. Expected: 400 INVALID_PARENT"
+          },
+          "event": [
+            {
+              "listen": "prerequest",
+              "script": {
+                "exec": [
+                  "const subtaskId = pm.collectionVariables.get('subtaskId');",
+                  "if (!subtaskId) { throw new Error('subtaskId is empty — run POST Create subtask in this folder first'); }"
+                ],
+                "type": "text/javascript"
+              }
+            },
+            {
+              "listen": "test",
+              "script": {
+                "exec": [
+                  "pm.test('400', () => pm.response.to.have.status(400));",
+                  "eval(pm.collectionVariables.get('assertCustomErrorFn'));",
+                  "assertCustomError(pm.response.json(), 'INVALID_PARENT');"
+                ],
+                "type": "text/javascript"
+              }
+            }
+          ]
+        },
+        {
+      "name": "POST Create grandchild via root tasks (parent=subtask)",
+      "request": {
+        "method": "POST",
+        "header": [
+          {
+            "key": "Content-Type",
+            "value": "application/json"
+          }
+        ],
+        "body": {
+          "mode": "raw",
+          "raw": "{\n  \"title\": \"Grandchild via POST /api/tasks/\",\n  \"description\": \"Parent field points at an existing subtask\",\n  \"parent\": {{subtaskId}}\n}"
+        },
+        "url": "{{baseUrl}}/api/tasks/",
+        "description": "Creating a task with another subtask as its parent must be rejected. Expected: 400 VALIDATION_ERROR."
+      },
+      "event": [
+        {
+          "listen": "prerequest",
+          "script": {
+            "exec": [
+              "const subtaskId = pm.collectionVariables.get('subtaskId');",
+              "if (!subtaskId) { throw new Error('subtaskId is empty — run POST Create subtask first'); }"
+            ],
+            "type": "text/javascript"
+          }
+        },
+        {
+          "listen": "test",
+          "script": {
+            "exec": [
+              "pm.test('Grandchild creation is rejected', () => {",
+              "    pm.response.to.have.status(400);",
+              "});",
+              "",
+              "const j = pm.response.json();",
+              "",
+              "pm.test('Returns standard validation error', () => {",
+              "    pm.expect(j).to.have.property('error');",
+              "    pm.expect(j.error.code).to.eql('VALIDATION_ERROR');",
+              "});",
+              "",
+              "pm.test('Parent validation error is present', () => {",
+              "    pm.expect(j.error.details).to.be.an('array');",
+              "    pm.expect(",
+              "        j.error.details.some(item => item.field === 'parent')",
+              "    ).to.eql(true);",
+              "});"
+            ],
+            "type": "text/javascript"
+          }
+        }
+      ]
+    },
+        {
+          "name": "GET Subtasks on unknown parent",
+          "request": { "method": "GET", "url": "{{baseUrl}}/api/tasks/{{unknownTaskId}}/subtasks/" },
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "exec": [
+                  "pm.test('404', () => pm.response.to.have.status(404));",
+                  "eval(pm.collectionVariables.get('assertCustomErrorFn'));",
+                  "assertCustomError(pm.response.json(), 'TASK_NOT_FOUND');"
+                ],
+                "type": "text/javascript"
+              }
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "name": "05 Breakdown",
+      "item": [
+        {
+          "name": "POST Breakdown happy path",
+          "request": {
+            "method": "POST",
+            "header": [{ "key": "Content-Type", "value": "application/json" }],
+            "body": { "mode": "raw", "raw": "{}" },
+            "url": "{{baseUrl}}/api/tasks/{{breakdownParentId}}/breakdown/",
+            "description": "Expected: 201; array of created subtasks"
+          },
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "exec": [
+                  "pm.test('201', () => pm.response.to.have.status(201));",
+                  "pm.test('array of tasks', () => { pm.expect(pm.response.json()).to.be.an('array'); pm.expect(pm.response.json().length).to.be.at.least(2); });"
+                ],
+                "type": "text/javascript"
+              }
+            }
+          ]
+        },
+        {
+          "name": "POST Breakdown empty segments (scripted)",
+          "request": {
+            "method": "GET",
+            "header": [],
+            "url": "{{baseUrl}}/api/tasks/",
+            "description": "Creates a task with description '...' (no splittable segments), then POST breakdown.\nExpected breakdown: 400 BREAKDOWN_ERROR"
+          },
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "exec": [
+                  "const base = pm.collectionVariables.get('baseUrl');",
+                  "pm.sendRequest({ url: base + '/api/tasks/', method: 'POST', header: { 'Content-Type': 'application/json' }, body: { mode: 'raw', raw: JSON.stringify({ title: 'No split', description: '...' }) } }, (e, r) => {",
+                  "  const id = r.json().id;",
+                  "  pm.sendRequest({ url: base + '/api/tasks/' + id + '/breakdown/', method: 'POST', header: { 'Content-Type': 'application/json' }, body: { mode: 'raw', raw: '{}' } }, (e2, res) => {",
+                  "    pm.test('400 BREAKDOWN_ERROR', () => { pm.expect(res.code).to.eql(400); pm.expect(res.json().error.code).to.eql('BREAKDOWN_ERROR'); });",
+                  "  });",
+                  "});"
+                ],
+                "type": "text/javascript"
+              }
+            }
+          ]
+        },
+        {
+          "name": "Setup — parent and subtask for breakdown-on-subtask test",
+          "request": {
+            "method": "GET",
+            "url": "{{baseUrl}}/api/tasks/",
+            "description": "Creates a fresh parent + subtask; sets breakdownParentId to the subtask id for the next request (overwrites meal-prep id only after happy-path breakdown ran)."
+          },
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "exec": [
+                  "const base = pm.collectionVariables.get('baseUrl');",
+                  "pm.sendRequest({ url: base + '/api/tasks/', method: 'POST', header: { 'Content-Type': 'application/json' }, body: { mode: 'raw', raw: JSON.stringify({ title: 'Breakdown invalid parent', description: 'Root for subtask breakdown test', priority: 'low' }) } }, (e1, parentRes) => {",
+                  "  pm.expect(parentRes.code).to.eql(201);",
+                  "  const parentId = parentRes.json().id;",
+                  "  pm.sendRequest({ url: base + '/api/tasks/' + parentId + '/subtasks/', method: 'POST', header: { 'Content-Type': 'application/json' }, body: { mode: 'raw', raw: JSON.stringify({ title: 'Child for breakdown test', description: 'Target subtask', priority: 'medium' }) } }, (e2, subRes) => {",
+                  "    pm.expect(subRes.code).to.eql(201);",
+                  "    const subtaskId = subRes.json().id;",
+                  "    pm.collectionVariables.set('breakdownParentId', String(subtaskId));",
+                  "    pm.test('breakdownParentId set to subtask', () => pm.expect(pm.collectionVariables.get('breakdownParentId')).to.eql(String(subtaskId)));",
+                  "  });",
+                  "});"
+                ],
+                "type": "text/javascript"
+              }
+            }
+          ]
+        },
+        {
+          "name": "POST Breakdown on subtask",
+          "request": {
+            "method": "POST",
+            "header": [{ "key": "Content-Type", "value": "application/json" }],
+            "body": { "mode": "raw", "raw": "{}" },
+            "url": "{{baseUrl}}/api/tasks/{{breakdownParentId}}/breakdown/",
+            "description": "breakdownParentId must be a subtask id from previous setup. Expected: 400 INVALID_PARENT"
+          },
+          "event": [
+            {
+              "listen": "prerequest",
+              "script": {
+                "exec": [
+                  "const id = pm.collectionVariables.get('breakdownParentId');",
+                  "if (!id) { throw new Error('breakdownParentId is empty — run setup in this folder first'); }"
+                ],
+                "type": "text/javascript"
+              }
+            },
+            {
+              "listen": "test",
+              "script": {
+                "exec": [
+                  "pm.test('400', () => pm.response.to.have.status(400));",
+                  "eval(pm.collectionVariables.get('assertCustomErrorFn'));",
+                  "assertCustomError(pm.response.json(), 'INVALID_PARENT');"
+                ],
+                "type": "text/javascript"
+              }
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "name": "06 Idempotency",
+      "item": [
+        {
+          "name": "POST Create — first with idempotency key",
+          "request": {
+            "method": "POST",
+            "header": [
+              { "key": "Content-Type", "value": "application/json" },
+              { "key": "Idempotency-Key", "value": "{{idempotencyKeyCreate}}" }
+            ],
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"title\": \"Idempotent task\",\n  \"description\": \"First request with idempotency key\"\n}"
+            },
+            "url": "{{baseUrl}}/api/tasks/"
+          },
+          "event": [
+            {
+              "listen": "prerequest",
+              "script": {
+                "exec": [
+                  "if (!pm.collectionVariables.get('idempotencyKeyCreate')) { throw new Error('Run 00 Setup first (idempotencyKeyCreate not set)'); }"
+                ],
+                "type": "text/javascript"
+              }
+            },
+            {
+              "listen": "test",
+              "script": {
+                "exec": [
+                  "pm.test('201', () => pm.response.to.have.status(201));",
+                  "const j = pm.response.json();",
+                  "pm.collectionVariables.set('idempotentTaskJson', JSON.stringify(j));",
+                  "pm.collectionVariables.set('idempotentCreateTaskId', String(j.id));"
+                ],
+                "type": "text/javascript"
+              }
+            }
+          ]
+        },
+        {
+          "name": "POST Create — replay same key and body",
+          "request": {
+            "method": "POST",
+            "header": [
+              { "key": "Content-Type", "value": "application/json" },
+              { "key": "Idempotency-Key", "value": "{{idempotencyKeyCreate}}" }
+            ],
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"title\": \"Idempotent task\",\n  \"description\": \"First request with idempotency key\"\n}"
+            },
+            "url": "{{baseUrl}}/api/tasks/",
+            "description": "Expected: 201 with identical JSON (same id as first — replay)"
+          },
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "exec": [
+                  "pm.test('201 replay', () => pm.response.to.have.status(201));",
+                  "const original = JSON.parse(pm.collectionVariables.get('idempotentTaskJson'));",
+                  "const replay = pm.response.json();",
+                  "pm.test('Replay JSON deep-equals first response', () => pm.expect(replay).to.eql(original));",
+                  "pm.test('Replayed task id equals original', () => {",
+                  "  pm.expect(replay.id).to.eql(original.id);",
+                  "  pm.expect(String(replay.id)).to.eql(pm.collectionVariables.get('idempotentCreateTaskId'));",
+                  "});"
+                ],
+                "type": "text/javascript"
+              }
+            }
+          ]
+        },
+        {
+          "name": "POST Create — same key different body",
+          "request": {
+            "method": "POST",
+            "header": [
+              { "key": "Content-Type", "value": "application/json" },
+              { "key": "Idempotency-Key", "value": "{{idempotencyKeyCreate}}" }
+            ],
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"title\": \"Different body\",\n  \"description\": \"Should conflict\"\n}"
+            },
+            "url": "{{baseUrl}}/api/tasks/",
+            "description": "Expected: 422 IDEMPOTENCY_KEY_REUSED"
+          },
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "exec": [
+                  "pm.test('422', () => pm.response.to.have.status(422));",
+                  "eval(pm.collectionVariables.get('assertCustomErrorFn'));",
+                  "assertCustomError(pm.response.json(), 'IDEMPOTENCY_KEY_REUSED');"
+                ],
+                "type": "text/javascript"
+              }
+            }
+          ]
+        },
+        {
+          "name": "POST Create — fail then retry same key",
+          "request": {
+            "method": "POST",
+            "header": [
+              { "key": "Content-Type", "value": "application/json" },
+              { "key": "Idempotency-Key", "value": "{{idempotencyKeyRetry}}" }
+            ],
+            "body": { "mode": "raw", "raw": "{\n  \"title\": \"\",\n  \"description\": \"invalid first\"\n}" },
+            "url": "{{baseUrl}}/api/tasks/",
+            "description": "Step 1 of 2: invalid (not stored). Run next request with SAME key in header manually or duplicate folder item."
+          },
+          "event": [
+            {
+              "listen": "prerequest",
+              "script": {
+                "exec": [
+                  "if (!pm.collectionVariables.get('idempotencyKeyRetry')) {",
+                  "  pm.collectionVariables.set('idempotencyKeyRetry', 'idem-retry-' + pm.variables.replaceIn('{{$randomUUID}}'));",
+                  "}"
+                ],
+                "type": "text/javascript"
+              }
+            },
+            {
+              "listen": "test",
+              "script": {
+                "exec": ["pm.test('400 first attempt', () => pm.response.to.have.status(400));"],
+                "type": "text/javascript"
+              }
+            }
+          ]
+        },
+        {
+          "name": "POST Create — corrected retry same key",
+          "request": {
+            "method": "POST",
+            "header": [
+              { "key": "Content-Type", "value": "application/json" },
+              { "key": "Idempotency-Key", "value": "{{idempotencyKeyRetry}}" }
+            ],
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"title\": \"Fixed after validation error\",\n  \"description\": \"Second attempt should create, not replay\"\n}"
+            },
+            "url": "{{baseUrl}}/api/tasks/",
+            "description": "Run immediately after previous request in folder order. Expected: 201"
+          },
+          "event": [{ "listen": "test", "script": { "exec": ["pm.test('201 after prior 400', () => pm.response.to.have.status(201));"], "type": "text/javascript" } }]
+        },
+        {
+          "name": "POST from-text — idempotent replay",
+          "request": {
+            "method": "POST",
+            "header": [
+              { "key": "Content-Type", "value": "application/json" },
+              { "key": "Idempotency-Key", "value": "{{idempotencyKeyFromText}}" }
+            ],
+            "body": { "mode": "raw", "raw": "{\n  \"text\": \"schedule dentist appointment tomorrow\"\n}" },
+            "url": "{{baseUrl}}/api/tasks/from-text/"
+          },
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "exec": [
+                  "pm.test('201', () => pm.response.to.have.status(201));",
+                  "const j = pm.response.json();",
+                  "pm.collectionVariables.set('fromTextIdempotentJson', JSON.stringify(j));",
+                  "pm.collectionVariables.set('fromTextIdempotentTaskId', String(j.id));"
+                ],
+                "type": "text/javascript"
+              }
+            }
+          ]
+        },
+        {
+          "name": "POST from-text — replay duplicate",
+          "request": {
+            "method": "POST",
+            "header": [
+              { "key": "Content-Type", "value": "application/json" },
+              { "key": "Idempotency-Key", "value": "{{idempotencyKeyFromText}}" }
+            ],
+            "body": { "mode": "raw", "raw": "{\n  \"text\": \"schedule dentist appointment tomorrow\"\n}" },
+            "url": "{{baseUrl}}/api/tasks/from-text/"
+          },
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "exec": [
+                  "pm.test('201 replay', () => pm.response.to.have.status(201));",
+                  "const original = JSON.parse(pm.collectionVariables.get('fromTextIdempotentJson'));",
+                  "const replay = pm.response.json();",
+                  "pm.test('Replay JSON deep-equals first from-text response', () => pm.expect(replay).to.eql(original));",
+                  "pm.test('Replayed task id equals original', () => {",
+                  "  pm.expect(replay.id).to.eql(original.id);",
+                  "  pm.expect(String(replay.id)).to.eql(pm.collectionVariables.get('fromTextIdempotentTaskId'));",
+                  "});"
+                ],
+                "type": "text/javascript"
+              }
+            }
+          ]
+        },
+        {
+          "name": "Setup — task for breakdown idempotency",
+          "request": {
+            "method": "POST",
+            "header": [{ "key": "Content-Type", "value": "application/json" }],
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"title\": \"Idempotent breakdown parent\",\n  \"description\": \"Plan phase one, execute phase two, and verify phase three\",\n  \"completed\": false,\n  \"priority\": \"medium\"\n}"
+            },
+            "url": "{{baseUrl}}/api/tasks/",
+            "description": "Fresh parent not yet broken down"
+          },
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "exec": [
+                  "pm.test('201', () => pm.response.to.have.status(201));",
+                  "pm.collectionVariables.set('breakdownIdempotencyParentId', String(pm.response.json().id));"
+                ],
+                "type": "text/javascript"
+              }
+            }
+          ]
+        },
+        {
+          "name": "POST Breakdown — first with idempotency key",
+          "request": {
+            "method": "POST",
+            "header": [
+              { "key": "Content-Type", "value": "application/json" },
+              { "key": "Idempotency-Key", "value": "{{idempotencyKeyBreakdown}}" }
+            ],
+            "body": { "mode": "raw", "raw": "{}" },
+            "url": "{{baseUrl}}/api/tasks/{{breakdownIdempotencyParentId}}/breakdown/",
+            "description": "Expected: 201 array of subtasks"
+          },
+          "event": [
+            {
+              "listen": "prerequest",
+              "script": {
+                "exec": [
+                  "if (!pm.collectionVariables.get('breakdownIdempotencyParentId')) { throw new Error('Run breakdown idempotency setup first'); }"
+                ],
+                "type": "text/javascript"
+              }
+            },
+            {
+              "listen": "test",
+              "script": {
+                "exec": [
+                  "pm.test('201', () => pm.response.to.have.status(201));",
+                  "const arr = pm.response.json();",
+                  "pm.collectionVariables.set('idempotentBreakdownJson', JSON.stringify(arr));",
+                  "pm.collectionVariables.set('idempotentBreakdownSubtaskCount', String(arr.length));",
+                  "pm.collectionVariables.set('idempotentBreakdownSubtaskIds', JSON.stringify(arr.map((t) => t.id).sort()));"
+                ],
+                "type": "text/javascript"
+              }
+            }
+          ]
+        },
+        {
+          "name": "POST Breakdown — replay same key and body",
+          "request": {
+            "method": "POST",
+            "header": [
+              { "key": "Content-Type", "value": "application/json" },
+              { "key": "Idempotency-Key", "value": "{{idempotencyKeyBreakdown}}" }
+            ],
+            "body": { "mode": "raw", "raw": "{}" },
+            "url": "{{baseUrl}}/api/tasks/{{breakdownIdempotencyParentId}}/breakdown/",
+            "description": "Expected: 201 replay; subtask count unchanged (no duplicate creation)"
+          },
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "exec": [
+                  "pm.test('201 replay', () => pm.response.to.have.status(201));",
+                  "const original = JSON.parse(pm.collectionVariables.get('idempotentBreakdownJson'));",
+                  "const replay = pm.response.json();",
+                  "pm.test('Replay JSON deep-equals first breakdown response', () => pm.expect(replay).to.eql(original));",
+                  "pm.test('Replayed subtask ids unchanged', () => {",
+                  "  const replayIds = replay.map((t) => t.id).sort();",
+                  "  const originalIds = JSON.parse(pm.collectionVariables.get('idempotentBreakdownSubtaskIds'));",
+                  "  pm.expect(replayIds).to.eql(originalIds);",
+                  "});",
+                  "const base = pm.collectionVariables.get('baseUrl');",
+                  "const parentId = pm.collectionVariables.get('breakdownIdempotencyParentId');",
+                  "const expected = parseInt(pm.collectionVariables.get('idempotentBreakdownSubtaskCount'), 10);",
+                  "pm.sendRequest({ url: base + '/api/tasks/' + parentId + '/subtasks/', method: 'GET' }, (err, res) => {",
+                  "  pm.test('Subtask count unchanged after replay', () => {",
+                  "    pm.expect(res.code).to.eql(200);",
+                  "    pm.expect(res.json().length).to.eql(expected);",
+                  "  });",
+                  "});"
+                ],
+                "type": "text/javascript"
+              }
+            }
+          ]
+        },
+        {
+          "name": "POST Breakdown — same key different body",
+          "request": {
+            "method": "POST",
+            "header": [
+              { "key": "Content-Type", "value": "application/json" },
+              { "key": "Idempotency-Key", "value": "{{idempotencyKeyBreakdown}}" }
+            ],
+            "body": { "mode": "raw", "raw": "{\n  \"clientNote\": \"different body\"\n}" },
+            "url": "{{baseUrl}}/api/tasks/{{breakdownIdempotencyParentId}}/breakdown/",
+            "description": "Expected: 422 IDEMPOTENCY_KEY_REUSED"
+          },
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "exec": [
+                  "pm.test('422', () => pm.response.to.have.status(422));",
+                  "eval(pm.collectionVariables.get('assertCustomErrorFn'));",
+                  "assertCustomError(pm.response.json(), 'IDEMPOTENCY_KEY_REUSED');"
+                ],
+                "type": "text/javascript"
+              }
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "name": "07 Filter Search Order Pagination",
+      "item": [
+        {
+          "name": "GET Filter completed=false",
+          "request": { "method": "GET", "url": "{{baseUrl}}/api/tasks/?completed=false" },
+          "event": [{ "listen": "test", "script": { "exec": ["pm.test('200', () => pm.response.to.have.status(200));", "pm.response.json().results.forEach(t => pm.expect(t.completed).to.eql(false));"], "type": "text/javascript" } }]
+        },
+        {
+          "name": "GET Filter priority=high",
+          "request": { "method": "GET", "url": "{{baseUrl}}/api/tasks/?priority=high" },
+          "event": [{ "listen": "test", "script": { "exec": ["pm.test('200 all high', () => { pm.response.to.have.status(200); pm.response.json().results.forEach(t => pm.expect(t.priority).to.eql('high')); });"], "type": "text/javascript" } }]
+        },
+        {
+          "name": "GET Search groceries",
+          "request": { "method": "GET", "url": "{{baseUrl}}/api/tasks/?search=groceries" },
+          "event": [{ "listen": "test", "script": { "exec": ["pm.test('200', () => pm.response.to.have.status(200));"], "type": "text/javascript" } }]
+        },
+        {
+          "name": "GET Order by -due_date",
+          "request": { "method": "GET", "url": "{{baseUrl}}/api/tasks/?ordering=-due_date" },
+          "event": [{ "listen": "test", "script": { "exec": ["pm.test('200', () => pm.response.to.have.status(200));"], "type": "text/javascript" } }]
+        },
+        {
+          "name": "GET Page 1",
+          "request": { "method": "GET", "url": "{{baseUrl}}/api/tasks/?page=1" },
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "exec": [
+                  "pm.test('200', () => pm.response.to.have.status(200));",
+                  "const j = pm.response.json();",
+                  "pm.test('DRF paginated shape', () => {",
+                  "  pm.expect(j).to.have.all.keys('count', 'next', 'previous', 'results');",
+                  "  pm.expect(j.results.length).to.be.at.most(10);",
+                  "});",
+                  "pm.collectionVariables.set('listTaskCount', String(j.count));"
+                ],
+                "type": "text/javascript"
+              }
+            }
+          ]
+        },
+        {
+          "name": "GET Page 2",
+          "request": {
+            "method": "GET",
+            "url": "{{baseUrl}}/api/tasks/?page=2",
+            "description": "Requires count > 10 (run 00 Setup bulk seed first). Expected: 200 with non-empty results when enough tasks exist"
+          },
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "exec": [
+                  "pm.test('200', () => pm.response.to.have.status(200));",
+                  "const j = pm.response.json();",
+                  "pm.test('DRF paginated shape', () => {",
+                  "  pm.expect(j).to.have.all.keys('count', 'next', 'previous', 'results');",
+                  "});",
+                  "const total = parseInt(pm.collectionVariables.get('listTaskCount') || j.count, 10);",
+                  "if (total > 10) {",
+                  "  pm.test('Page 2 has results', () => pm.expect(j.results.length).to.be.above(0));",
+                  "  pm.test('Page 1 had next link when count > 10', () => pm.expect(total).to.be.above(10));",
+                  "} else {",
+                  "  pm.test.skip('count <= 10 — run 00 Setup pagination bulk seed');",
+                  "}"
+                ],
+                "type": "text/javascript"
+              }
+            }
+          ]
+        },
+        {
+          "name": "GET Combined filter search order page",
+          "request": {
+            "method": "GET",
+            "url": {
+              "raw": "{{baseUrl}}/api/tasks/?completed=true&priority=high&search=rent&ordering=-created_at&page=1",
+              "host": ["{{baseUrl}}"],
+              "path": ["api", "tasks", ""],
+              "query": [
+                { "key": "completed", "value": "true" },
+                { "key": "priority", "value": "high" },
+                { "key": "search", "value": "rent" },
+                { "key": "ordering", "value": "-created_at" },
+                { "key": "page", "value": "1" }
+              ]
+            },
+            "description": "Expected: 200 paginated; each result matches filters and search (seed: Pay high priority rent in 00 Setup)"
+          },
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "exec": [
+                  "pm.test('200', () => pm.response.to.have.status(200));",
+                  "const j = pm.response.json();",
+                  "pm.test('Paginated envelope', () => pm.expect(j).to.have.all.keys('count', 'next', 'previous', 'results'));",
+                  "pm.test('Each result matches filters', () => {",
+                  "  j.results.forEach((t) => {",
+                  "    pm.expect(t.completed).to.eql(true);",
+                  "    pm.expect(t.priority).to.eql('high');",
+                  "    const hay = (t.title + ' ' + t.description).toLowerCase();",
+                  "    pm.expect(hay).to.include('rent');",
+                  "  });",
+                  "});"
+                ],
+                "type": "text/javascript"
+              }
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "name": "08 Priority endpoint",
+      "item": [
+        {
+          "name": "GET priority high",
+          "request": { "method": "GET", "url": "{{baseUrl}}/api/tasks/priority/high/" },
+          "event": [{ "listen": "test", "script": { "exec": ["pm.test('200 array', () => { pm.response.to.have.status(200); pm.expect(pm.response.json()).to.be.an('array'); });"], "type": "text/javascript" } }]
+        },
+        {
+          "name": "GET priority medium",
+          "request": { "method": "GET", "url": "{{baseUrl}}/api/tasks/priority/medium/" },
+          "event": [{ "listen": "test", "script": { "exec": ["pm.test('200', () => pm.response.to.have.status(200));"], "type": "text/javascript" } }]
+        },
+        {
+          "name": "GET priority low",
+          "request": { "method": "GET", "url": "{{baseUrl}}/api/tasks/priority/low/" },
+          "event": [{ "listen": "test", "script": { "exec": ["pm.test('200', () => pm.response.to.have.status(200));"], "type": "text/javascript" } }]
+        },
+        {
+          "name": "GET priority invalid urgent",
+          "request": { "method": "GET", "url": "{{baseUrl}}/api/tasks/priority/urgent/" },
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "exec": [
+                  "pm.test('400', () => pm.response.to.have.status(400));",
+                  "eval(pm.collectionVariables.get('assertCustomErrorFn'));",
+                  "assertCustomError(pm.response.json(), 'INVALID_PRIORITY');"
+                ],
+                "type": "text/javascript"
+              }
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "name": "09 Cascade delete parent",
+      "item": [
+        {
+          "name": "Create parent with subtask then DELETE parent",
+          "request": {
+            "method": "POST",
+            "header": [{ "key": "Content-Type", "value": "application/json" }],
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"title\": \"Cascade parent\",\n  \"description\": \"Will be deleted with children\"\n}"
+            },
+            "url": "{{baseUrl}}/api/tasks/"
+          },
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "exec": [
+                  "const base = pm.collectionVariables.get('baseUrl');",
+                  "const parentId = pm.response.json().id;",
+                  "pm.sendRequest({ url: base + '/api/tasks/' + parentId + '/subtasks/', method: 'POST', header: { 'Content-Type': 'application/json' }, body: { mode: 'raw', raw: JSON.stringify({ title: 'Child', description: 'Cascade child' }) } }, (e1, subRes) => {",
+                  "  const childId = subRes.json().id;",
+                  "  pm.sendRequest({ url: base + '/api/tasks/' + parentId + '/', method: 'DELETE' }, (e2, delRes) => {",
+                  "    pm.test('DELETE parent 204', () => pm.expect(delRes.code).to.eql(204));",
+                  "    pm.sendRequest({ url: base + '/api/tasks/' + childId + '/', method: 'GET' }, (e3, getChild) => {",
+                  "      pm.test('Child deleted with parent', () => pm.expect(getChild.code).to.eql(404));",
+                  "    });",
+                  "  });",
+                  "});"
+                ],
+                "type": "text/javascript"
+              }
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "name": "10 Mock-only scenarios (documented, not runnable in Postman)",
+      "description": "These cases require pytest/unittest with unittest.mock.patch on tasks.ai.parse_task_text or break_down_task:\n\n- Parser returns non-dict → 502 PARSER_ERROR\n- Parser raises Exception → 502 PARSER_ERROR\n- Parser returns dict failing TaskSerializer → 502 PARSER_VALIDATION_ERROR (empty title, bad types)\n- break_down_task returns invalid items → 502 BREAKDOWN_VALIDATION_ERROR; assert DB subtask count unchanged\n\nSee tasks/tests.py for serializer-level coverage; add API tests with APIClient + mock.",
+      "item": [
+        {
+          "name": "README — run Django tests instead",
+          "request": { "method": "GET", "url": "{{baseUrl}}/api/tasks/" },
+          "description": "Placeholder request. Run: python manage.py test tasks"
+        }
+      ]
+    }
+  ]
+}
